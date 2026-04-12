@@ -14,9 +14,7 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GCP_JSON_STR = os.getenv("GCP_JSON")
 
 TRACK17_URL = "https://api.17track.net/track/v2.4/gettrackinfo"
-
-# Đây mới là mã ID hãng vận chuyển USPS trên 17Track
-USPS_CARRIER_CODE = 21051  
+USPS_CARRIER_CODE = 21051  # ID chuẩn của USPS
 
 def get_google_sheet():
     """Đăng nhập Google Sheet"""
@@ -28,10 +26,13 @@ def get_google_sheet():
         scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     )
     client = gspread.authorize(creds)
+    
+    # LƯU Ý: Đảm bảo Tab trong file Google Sheet của bạn tên là 'Data'
+    # Nếu tên tab là 'Sheet1' thì bạn sửa chữ 'Data' thành 'Sheet1' nhé
     return client.open_by_key(SPREADSHEET_ID).worksheet("Data")
 
 def calculate_sla(label_at, transit_at):
-    """Tính toán cảnh báo SLA (vibe check)"""
+    """Tính toán cảnh báo SLA"""
     if not label_at or not transit_at:
         return ""
     try:
@@ -48,7 +49,7 @@ def calculate_sla(label_at, transit_at):
         return "N/A"
 
 def run_sync():
-    print(f"🚀 [USPS TikTok Mode] Bắt đầu quét lúc: {datetime.now()}")
+    print(f"🚀 [USPS Mode] Bắt đầu quét lúc: {datetime.now()}")
     
     try:
         sheet = get_google_sheet()
@@ -62,16 +63,16 @@ def run_sync():
 
     # Bước 1: Thu thập mã từ Sheet
     for idx, row in enumerate(records, start=2):
-        num = str(row.get('Tracking Number', '')).strip()
+        # 🟢 ĐÃ FIX: Lấy đúng tên cột Tracking_Number theo file CSV
+        num = str(row.get('Tracking_Number', '')).strip()
         
-        # Chỉ nhặt các mã có độ dài hợp lý và (tuỳ chọn) bắt đầu bằng 190002
+        # Lọc các mã hợp lệ (mã bạn gửi là USPS bắt đầu bằng 92, dài 22 số)
         if num and len(num) > 10:
-            # Truyền ID 71000 (USPS) để 17Track lấy dữ liệu nhanh nhất
             tracking_list.append({"number": num, "carrier": USPS_CARRIER_CODE})
             row_mapping[num] = idx
 
     if not tracking_list:
-        print("📭 Không có mã nào hợp lệ để quét.")
+        print("📭 Không có mã nào hợp lệ để quét. Hãy kiểm tra lại tên cột trong file Sheet.")
         return
 
     # Bước 2: Gọi API 17Track v2.4 (Batch 40)
@@ -121,7 +122,7 @@ def run_sync():
                 # Tính SLA
                 sla_val = calculate_sla(label_at, transit_at)
 
-                # Chuẩn bị update lên Sheet
+                # Chuẩn bị update lên Sheet (Khớp hoàn toàn với Cột C -> G trong file của bạn)
                 ridx = row_mapping.get(num)
                 if ridx:
                     updates.append({
