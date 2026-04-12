@@ -13,7 +13,7 @@ TRACK17_API_KEY = os.getenv("TRACK17_API_KEY")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GCP_JSON_STR = os.getenv("GCP_JSON")
 
-# 2 Endpoint cần thiết cho v2.4
+# 17Track v2.4 Endpoints
 REGISTER_URL = "https://api.17track.net/track/v2.4/register"
 TRACK_INFO_URL = "https://api.17track.net/track/v2.4/gettrackinfo"
 USPS_CARRIER_CODE = 21051  
@@ -27,6 +27,7 @@ def get_google_sheet():
         scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     )
     client = gspread.authorize(creds)
+    # Mở worksheet tên là "Data"
     return client.open_by_key(SPREADSHEET_ID).worksheet("Data")
 
 def calculate_sla(label_at, transit_at):
@@ -41,11 +42,12 @@ def calculate_sla(label_at, transit_at):
     except: return "N/A"
 
 def run_sync():
-    print(f"🚀 [USPS Auto-Register] Bắt đầu quét lúc: {datetime.now()}")
+    print(f"🚀 [VibeCoder - Full Action] Bắt đầu lúc: {datetime.now()}")
     
     try:
         sheet = get_google_sheet()
         records = sheet.get_all_records()
+        print(f"✅ Đã kết nối Sheet, tìm thấy {len(records)} dòng.")
     except Exception as e:
         print(f"❌ Lỗi truy cập Sheet: {e}")
         return
@@ -60,49 +62,44 @@ def run_sync():
             row_mapping[num] = idx
 
     if not tracking_list:
-        print("📭 Không có mã nào để xử lý.")
+        print("📭 Không tìm thấy mã vận đơn hợp lệ.")
         return
 
     headers = {"Content-Type": "application/json", "17token": TRACK17_API_KEY}
     updates = []
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # Chia batch 40 số để xử lý
+    # Chia batch 40
     for i in range(0, len(tracking_list), 40):
         batch = tracking_list[i:i+40]
-        print(f"📦 Batch {i//40 + 1}: Xử lý {len(batch)} mã...")
+        print(f"📦 Đang xử lý Batch {i//40 + 1} ({len(batch)} mã)...")
         
         try:
-            # BƯỚC 1: ĐĂNG KÝ (REGISTER)
-            # 17Track yêu cầu mã phải được đăng ký trước khi lấy thông tin
+            # --- BƯỚC 1: HÀNH ĐỘNG ĐĂNG KÝ (REGISTER) ---
+            print(f"   -> Đang đăng ký mã với 17Track...")
             reg_resp = requests.post(REGISTER_URL, json=batch, headers=headers)
-            reg_data = reg_resp.json()
-            if reg_data.get("code") == 0:
-                print(f"   ✅ Đăng ký thành công {len(batch)} mã với 17Track.")
-            else:
-                print(f"   ⚠️ Lưu ý đăng ký: {reg_data.get('msg')}")
+            # Chúng ta không cần đợi kết quả register quá lâu, cứ đăng ký rồi đi tiếp
+            
+            time.sleep(2) # Nghỉ 2s để 17Track kịp khởi tạo dữ liệu
 
-            # Đợi 1 chút để hệ thống 17Track ghi nhận
-            time.sleep(1)
-
-            # BƯỚC 2: LẤY THÔNG TIN (GET INFO)
+            # --- BƯỚC 2: HÀNH ĐỘNG LẤY THÔNG TIN (GET INFO) ---
+            print(f"   -> Đang lấy thông tin hành trình...")
             info_resp = requests.post(TRACK_INFO_URL, json=batch, headers=headers)
             res_data = info_resp.json()
             
-            if res_data.get("code") != 0:
-                print(f"   ❌ Lỗi GetInfo: {res_data.get('msg')}")
-                continue
+            data_body = res_data.get("data", {})
+            accepted = data_body.get("accepted", [])
+            rejected = data_body.get("rejected", [])
 
-            accepted = res_data.get("data", {}).get("accepted", [])
+            # Xử lý các mã được nhận (Accepted)
             for item in accepted:
                 num = item.get("number")
                 info = item.get("track_info") or {}
                 stt_obj = info.get("latest_status") or {}
                 
-                # Trạng thái thô từ 17Track
-                status_raw = stt_obj.get("status", "Pending")
-                
-                # Tìm mốc thời gian Events
+                # Nếu mới đăng ký, status thường là "NotFound" hoặc "Pending"
+                current_stt = stt_obj.get("status", "Registered/Pending")
+
                 label_at, transit_at = "", ""
                 providers = info.get("tracking", {}).get("providers", []) if info else []
                 events = providers[0].get("events", []) if providers else []
@@ -114,29 +111,40 @@ def run_sync():
                     if ("label created" in desc or "info received" in desc) and not label_at:
                         label_at = t_utc
                     if ("in transit" in desc or "accepted" in desc or "picked up" in desc) and not transit_at:
-                        transit_at = t_utc
+                        transit_at = transit_at = t_utc
 
                 sla_val = calculate_sla(label_at, transit_at)
                 ridx = row_mapping.get(num)
                 if ridx:
                     updates.append({
                         'range': f'C{ridx}:G{ridx}',
-                        'values': [[status_raw, label_at, transit_at, sla_val, now_str]]
+                        'values': [[current_stt, label_at, transit_at, sla_val, now_str]]
                     })
 
-            # Tránh spam API
+            # Xử lý các mã bị từ chối (Rejected)
+            for item in rejected:
+                num = item.get("number")
+                msg = item.get("error", {}).get("message", "Rejected")
+                ridx = row_mapping.get(num)
+                if ridx:
+                    # Ghi lý do bị từ chối lên Sheet để người dùng biết
+                    updates.append({
+                        'range': f'C{ridx}:G{ridx}',
+                        'values': [[f"Error: {msg}", "", "", "", now_str]]
+                    })
+
             time.sleep(1)
 
         except Exception as e:
             print(f"⚠️ Lỗi xử lý batch: {e}")
 
-    # BƯỚC 3: CẬP NHẬT SHEET
+    # --- BƯỚC 3: HÀNH ĐỘNG GHI LÊN GOOGLE SHEET ---
     if updates:
-        print(f"📝 Đang ghi {len(updates)} kết quả lên Sheet...")
+        print(f"📝 Đang ghi {len(updates)} hành động lên Google Sheet...")
         sheet.batch_update(updates)
-        print("✅ Done!")
+        print("✅ Hoàn tất cập nhật file Google Sheet!")
     else:
-        print("ℹ️ Đã đăng ký mã nhưng 17Track chưa có dữ liệu ngay. Hãy đợi 15-30p rồi chạy lại.")
+        print("ℹ️ Không có dữ liệu nào được ghi.")
 
 if __name__ == "__main__":
     run_sync()
