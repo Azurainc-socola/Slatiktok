@@ -7,159 +7,140 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ==========================================
-# CẤU HÌNH BIẾN MÔI TRƯỜNG (Từ GitHub Secrets)
+# CẤU HÌNH API & HỆ THỐNG
 # ==========================================
 TRACK17_API_KEY = os.getenv("TRACK17_API_KEY")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GCP_JSON_STR = os.getenv("GCP_JSON")
 
-TRACK17_URL = "https://api.17track.net/track/v2.2/gettrackinfo"
+TRACK17_URL = "https://api.17track.net/track/v2.4/gettrackinfo"
+
+# Đây mới là mã ID hãng vận chuyển USPS trên 17Track
+USPS_CARRIER_CODE = 21051  
 
 def get_google_sheet():
-    """Đăng nhập và lấy bảng tính Google Sheet bằng JSON credentials"""
+    """Đăng nhập Google Sheet"""
     if not GCP_JSON_STR:
-        raise ValueError("❌ Lỗi: Không tìm thấy biến môi trường GCP_JSON.")
-        
-    # Parse chuỗi JSON từ biến môi trường thành Dictionary
+        raise ValueError("❌ Lỗi: Thiếu GCP_JSON trong Env Var.")
     creds_dict = json.loads(GCP_JSON_STR)
     creds = Credentials.from_service_account_info(
         creds_dict,
         scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     )
     client = gspread.authorize(creds)
-    # Mở file bằng ID và chọn Tab tên là 'Data'
     return client.open_by_key(SPREADSHEET_ID).worksheet("Data")
 
-def calculate_sla(label_created_at, in_transit_at):
-    """Tính toán cảnh báo SLA dựa trên thời gian chênh lệch"""
-    if in_transit_at:
-        return "🟢 OK"
-    if not label_created_at:
-        return "⚪ WAITING"
-
-    # Xử lý tính toán thời gian (Giả định format 17Track trả về: YYYY-MM-DD HH:MM)
+def calculate_sla(label_at, transit_at):
+    """Tính toán cảnh báo SLA (vibe check)"""
+    if not label_at or not transit_at:
+        return ""
     try:
-        label_time = datetime.strptime(label_created_at[:16], "%Y-%m-%d %H:%M")
-        now = datetime.utcnow() # Dùng UTC vì Github Actions server chạy múi giờ UTC
+        t1 = datetime.fromisoformat(label_at.replace('Z', '+00:00'))
+        t2 = datetime.fromisoformat(transit_at.replace('Z', '+00:00'))
         
-        # Tính số giờ chênh lệch
-        delta_hours = (now - label_time).total_seconds() / 3600
+        diff = t2 - t1
+        hours = diff.total_seconds() / 3600
         
-        if delta_hours >= 72: return "🔴 LATE_72H"
-        if delta_hours >= 60: return "🟠 LATE_60H"
-        if delta_hours >= 48: return "🟡 LATE_48H"
-        if delta_hours >= 24: return "🔵 LATE_24H"
-        return "⚪ WAITING"
-    except Exception as e:
-        return "⚪ ERROR DATE"
+        if hours <= 24: return "✅ EXCELLENT (<24h)"
+        if hours <= 48: return "⚡ GOOD (<48h)"
+        return f"⚠️ DELAY ({int(hours)}h)"
+    except:
+        return "N/A"
 
-def main():
-    print("🚀 Bắt đầu chạy TikTok SLA Bot...")
+def run_sync():
+    print(f"🚀 [USPS TikTok Mode] Bắt đầu quét lúc: {datetime.now()}")
     
     try:
         sheet = get_google_sheet()
+        records = sheet.get_all_records()
     except Exception as e:
-        print(f"❌ Lỗi kết nối Google Sheet: {e}")
+        print(f"❌ Lỗi truy cập Sheet: {e}")
         return
-    
-    # Lấy toàn bộ dữ liệu từ Sheet
-    records = sheet.get_all_records()
-    trackings_to_query = []
+
+    tracking_list = []
     row_mapping = {}
 
-    # BƯỚC 1: LỌC DỮ LIỆU
-    for i, row in enumerate(records):
-        row_idx = i + 2 # Do gspread đếm từ 1 và trừ đi dòng header ở dòng 1
-        tracking = str(row.get("Tracking_Number", "")).strip()
-        status_17 = str(row.get("17Track_Status", "")).strip()
-        sla_status = str(row.get("SLA_Status", "")).strip()
+    # Bước 1: Thu thập mã từ Sheet
+    for idx, row in enumerate(records, start=2):
+        num = str(row.get('Tracking Number', '')).strip()
+        
+        # Chỉ nhặt các mã có độ dài hợp lý và (tuỳ chọn) bắt đầu bằng 190002
+        if num and len(num) > 10:
+            # Truyền ID 71000 (USPS) để 17Track lấy dữ liệu nhanh nhất
+            tracking_list.append({"number": num, "carrier": USPS_CARRIER_CODE})
+            row_mapping[num] = idx
 
-        # Chỉ lấy tracking bắt đầu bằng 920019, chưa Delivered và chưa có nhãn Xanh (OK)
-        if tracking.startswith("920019") and "🟢 OK" not in sla_status and "Delivered" not in status_17:
-            trackings_to_query.append({"number": tracking, "carrier": 3011}) # 3011 là code của USPS
-            row_mapping[tracking] = row_idx
-
-    if not trackings_to_query:
-        print("✅ Không có đơn hàng nào cần kiểm tra. Kết thúc luồng!")
+    if not tracking_list:
+        print("📭 Không có mã nào hợp lệ để quét.")
         return
 
-    print(f"🔍 Tìm thấy {len(trackings_to_query)} mã vận đơn cần gọi API...")
-
-    # BƯỚC 2: GỌI API 17TRACK (Chia batch 40 mã/lần để tránh bị chặn)
-    batch_size = 40
+    # Bước 2: Gọi API 17Track v2.4 (Batch 40)
+    headers = {"Content-Type": "application/json", "17token": TRACK17_API_KEY}
     updates = []
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    headers = {
-        "17token": TRACK17_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    for i in range(0, len(trackings_to_query), batch_size):
-        batch = trackings_to_query[i:i + batch_size]
+    for i in range(0, len(tracking_list), 40):
+        batch = tracking_list[i:i+40]
+        print(f"📦 Batch {i//40 + 1}: Đang check {len(batch)} mã...")
         
         try:
-            response = requests.post(TRACK17_URL, headers=headers, json=batch)
-            data = response.json()
-
-            if data.get("code") != 0:
-                print(f"❌ Lỗi từ 17Track cho batch này: {data}")
+            resp = requests.post(TRACK17_URL, json=batch, headers=headers)
+            res_data = resp.json()
+            
+            if res_data.get("code") != 0:
+                print(f"❌ Lỗi API: {res_data.get('msg')}")
                 continue
 
-            for result in data.get("data", {}).get("accepted", []):
-                tracking_num = result.get("number")
-                track_info = result.get("track", {})
-                if not track_info:
-                    continue
+            accepted = res_data.get("data", {}).get("accepted", [])
+            for item in accepted:
+                num = item.get("number")
+                info = item.get("track_info", {})
+                if not info: continue
 
-                events = track_info.get("z1", [])
-                events_sorted = sorted(events, key=lambda x: x.get("a", "")) # Cũ nhất xếp trước
+                # Lấy trạng thái mới nhất
+                stt_obj = info.get("latest_status", {})
+                current_stt = stt_obj.get("status", "NotFound")
 
+                # Tìm mốc thời gian trong Events (v2.4)
                 label_at = ""
                 transit_at = ""
-                current_status = "Info Received"
+                providers = info.get("tracking", {}).get("providers", [])
+                events = providers[0].get("events", []) if providers else []
 
-                # Xác định status khái quát từ 17Track
-                status_code = track_info.get("e", 0)
-                if status_code == 10: current_status = "Not Found"
-                elif status_code == 20: current_status = "In Transit"
-                elif status_code == 40: current_status = "Delivered"
-
-                # Bóc tách sự kiện tìm thời gian tạo Label và In Transit
-                for ev in events_sorted:
-                    desc = ev.get("z", "").lower()
-                    time_str = ev.get("a", "")
+                for ev in sorted(events, key=lambda x: x.get("time_utc", "")):
+                    desc = ev.get("description", "").lower()
+                    time_utc = ev.get("time_utc", "")
                     
-                    if ("label created" in desc or "info received" in desc) and not label_at:
-                        label_at = time_str
-                    
-                    if ("in transit" in desc or "accepted at usps" in desc or "arrived at usps" in desc) and not transit_at:
-                        transit_at = time_str
+                    if not time_utc: continue
 
-                # Tính nhãn phân loại SLA
-                sla = calculate_sla(label_at, transit_at)
+                    if ("label created" in desc or "info received" in desc or "shipping info received" in desc) and not label_at:
+                        label_at = time_utc
+                    if ("in transit" in desc or "accepted" in desc or "picked up" in desc) and not transit_at:
+                        transit_at = time_utc
 
-                # Lưu vào danh sách chuẩn bị update lên Sheet
-                row_idx = row_mapping.get(tracking_num)
-                if row_idx:
-                    # Ghi nhận thay đổi từ Cột C đến Cột G
+                # Tính SLA
+                sla_val = calculate_sla(label_at, transit_at)
+
+                # Chuẩn bị update lên Sheet
+                ridx = row_mapping.get(num)
+                if ridx:
                     updates.append({
-                        'range': f'C{row_idx}:G{row_idx}',
-                        'values': [[current_status, label_at, transit_at, sla, now_str]]
+                        'range': f'C{ridx}:G{ridx}',
+                        'values': [[current_stt, label_at, transit_at, sla_val, now_str]]
                     })
 
-            time.sleep(0.5) # Nghỉ nửa giây giữa các batch để giữ an toàn cho API
+            time.sleep(0.5)
 
         except Exception as e:
-            print(f"❌ Lỗi Exception khi xử lý API 17Track: {e}")
+            print(f"⚠️ Lỗi Batch: {e}")
 
-    # BƯỚC 3: GHI DỮ LIỆU LÊN GOOGLE SHEET (Batch Update)
+    # Bước 3: Đổ dữ liệu về Sheet
     if updates:
-        print(f"📝 Đang cập nhật đồng loạt {len(updates)} dòng lên Google Sheet...")
+        print(f"📝 Đang ghi {len(updates)} dòng...")
         sheet.batch_update(updates)
-        print("✅ Hoàn tất quy trình thành công!")
+        print("✅ Done!")
     else:
-        print("✅ Đã gọi API xong nhưng không có dữ liệu trạng thái nào mới để cập nhật lên Sheet.")
+        print("ℹ️ Không có gì để cập nhật.")
 
 if __name__ == "__main__":
-    main()
+    run_sync()
