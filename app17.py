@@ -69,20 +69,18 @@ def run_sync():
     updates = []
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # Chia batch 40
+    # Chia batch 40 số để gửi API
     for i in range(0, len(tracking_list), 40):
         batch = tracking_list[i:i+40]
         print(f"📦 Đang xử lý Batch {i//40 + 1} ({len(batch)} mã)...")
         
         try:
-            # --- BƯỚC 1: HÀNH ĐỘNG ĐĂNG KÝ (REGISTER) ---
+            # --- BƯỚC 1: ĐĂNG KÝ (REGISTER) ---
             print(f"   -> Đang đăng ký mã với 17Track...")
-            reg_resp = requests.post(REGISTER_URL, json=batch, headers=headers)
-            # Chúng ta không cần đợi kết quả register quá lâu, cứ đăng ký rồi đi tiếp
-            
-            time.sleep(2) # Nghỉ 2s để 17Track kịp khởi tạo dữ liệu
+            requests.post(REGISTER_URL, json=batch, headers=headers)
+            time.sleep(2) # Nghỉ 2s để hệ thống kịp khởi tạo
 
-            # --- BƯỚC 2: HÀNH ĐỘNG LẤY THÔNG TIN (GET INFO) ---
+            # --- BƯỚC 2: LẤY THÔNG TIN (GET INFO) ---
             print(f"   -> Đang lấy thông tin hành trình...")
             info_resp = requests.post(TRACK_INFO_URL, json=batch, headers=headers)
             res_data = info_resp.json()
@@ -97,9 +95,10 @@ def run_sync():
                 info = item.get("track_info") or {}
                 stt_obj = info.get("latest_status") or {}
                 
-                # Nếu mới đăng ký, status thường là "NotFound" hoặc "Pending"
-                current_stt = stt_obj.get("status", "Registered/Pending")
+                # Trạng thái hiện tại
+                current_stt = stt_obj.get("status", "Registered")
 
+                # Tìm mốc thời gian SLA
                 label_at, transit_at = "", ""
                 providers = info.get("tracking", {}).get("providers", []) if info else []
                 events = providers[0].get("events", []) if providers else []
@@ -111,7 +110,7 @@ def run_sync():
                     if ("label created" in desc or "info received" in desc) and not label_at:
                         label_at = t_utc
                     if ("in transit" in desc or "accepted" in desc or "picked up" in desc) and not transit_at:
-                        transit_at = transit_at = t_utc
+                        transit_at = t_utc
 
                 sla_val = calculate_sla(label_at, transit_at)
                 ridx = row_mapping.get(num)
@@ -121,30 +120,27 @@ def run_sync():
                         'values': [[current_stt, label_at, transit_at, sla_val, now_str]]
                     })
 
-            # Xử lý các mã bị từ chối (Rejected)
+            # Xử lý các mã bị từ chối (vẫn ghi lỗi lên Sheet để bạn biết)
             for item in rejected:
                 num = item.get("number")
-                msg = item.get("error", {}).get("message", "Rejected")
+                error_msg = item.get("error", {}).get("message", "Rejected")
                 ridx = row_mapping.get(num)
                 if ridx:
-                    # Ghi lý do bị từ chối lên Sheet để người dùng biết
                     updates.append({
                         'range': f'C{ridx}:G{ridx}',
-                        'values': [[f"Error: {msg}", "", "", "", now_str]]
+                        'values': [[f"Error: {error_msg}", "", "", "", now_str]]
                     })
-
-            time.sleep(1)
 
         except Exception as e:
             print(f"⚠️ Lỗi xử lý batch: {e}")
 
-    # --- BƯỚC 3: HÀNH ĐỘNG GHI LÊN GOOGLE SHEET ---
+    # --- BƯỚC 3: GHI DỮ LIỆU LÊN GOOGLE SHEET (QUAN TRỌNG) ---
     if updates:
-        print(f"📝 Đang ghi {len(updates)} hành động lên Google Sheet...")
+        print(f"📝 Đang ghi {len(updates)} dòng dữ liệu lên Google Sheet...")
         sheet.batch_update(updates)
-        print("✅ Hoàn tất cập nhật file Google Sheet!")
+        print("✅ ĐÃ CẬP NHẬT SHEET THÀNH CÔNG!")
     else:
-        print("ℹ️ Không có dữ liệu nào được ghi.")
+        print("ℹ️ Không có dữ liệu nào để ghi lên Sheet.")
 
 if __name__ == "__main__":
     run_sync()
