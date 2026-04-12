@@ -24,4 +24,4 @@ jobs:
           TRACK17_API_KEY: ${{ secrets.TRACK17_API_KEY }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GCP_JSON: ${{ secrets.GCP_JSON }}
-        run: python app.py
+        run: python app17.py
