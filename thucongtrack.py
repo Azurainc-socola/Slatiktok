@@ -17,6 +17,7 @@ REGISTER_URL = "https://api.17track.net/track/v2.4/register"
 TRACK_INFO_URL = "https://api.17track.net/track/v2.4/gettrackinfo"
 USPS_CARRIER_CODE = 21051
 
+# Lấy Secrets
 try:
     TRACK17_API_KEY = st.secrets["TRACK17_API_KEY"]
     SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
@@ -26,7 +27,7 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. CÁC HÀM XỬ LÝ
+# 2. CÁC HÀM XỬ LÝ (CORE LOGIC)
 # ==========================================
 def get_google_sheet():
     creds_dict = json.loads(GCP_JSON_STR)
@@ -37,13 +38,6 @@ def get_google_sheet():
     client = gspread.authorize(creds)
     return client.open_by_key(SPREADSHEET_ID).worksheet("Data")
 
-def to_vn_time_str(iso_str):
-    if not iso_str: return ""
-    try:
-        dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
-        return dt.astimezone(VN_TZ).strftime("%Y-%m-%d %H:%M")
-    except: return ""
-
 def calculate_sla_hours(label_at_str, transit_at_str):
     if not label_at_str: return ""
     try:
@@ -53,8 +47,15 @@ def calculate_sla_hours(label_at_str, transit_at_str):
         return int((t_end - t_label).total_seconds() / 3600)
     except: return ""
 
+def to_vn_time_str(iso_str):
+    if not iso_str: return ""
+    try:
+        dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+        return dt.astimezone(VN_TZ).strftime("%Y-%m-%d %H:%M")
+    except: return ""
+
 # ==========================================
-# 3. GIAO DIỆN NGƯỜI DÙNG (UI)
+# 3. GIAO DIỆN & XỬ LÝ DỮ LIỆU
 # ==========================================
 st.set_page_config(page_title="Azura SLA Management", page_icon="🚀", layout="wide")
 st.title("🚚 Azura 17Track Management App")
@@ -62,14 +63,17 @@ st.title("🚚 Azura 17Track Management App")
 try:
     sheet = get_google_sheet()
     
-    # 🔥 FIX TRIỆT ĐỂ: Ép Google trả về dạng TEXT nguyên bản, không convert số
-    # value_render_option='FORMATTED_VALUE' sẽ lấy đúng những gì hiển thị trên ô
-    records = sheet.get_all_records(value_render_option='FORMATTED_VALUE') 
+    # 🔥 CÁCH TIẾP CẬN MỚI: Đọc mảng thô để không bị ép kiểu số
+    # FORMATTED_VALUE: Giữ nguyên định dạng chữ trên Sheet
+    raw_data = sheet.get_all_values(value_render_option='FORMATTED_VALUE')
     
-    df = pd.DataFrame(records)
-    
-    # Hiển thị Dashboard
-    if not df.empty:
+    if len(raw_data) > 1:
+        headers = raw_data[0]
+        # Chuyển đổi mảng thô thành List of Dicts thủ công
+        records = [dict(zip(headers, row)) for row in raw_data[1:]]
+        df = pd.DataFrame(records)
+        
+        # Dashboard
         c1, c2, c3 = st.columns(3)
         c1.metric("Tổng đơn", len(df))
         c2.metric("Chưa Register", len(df[df['Register_Track'] != 'done']))
@@ -78,11 +82,11 @@ try:
         st.write("### Danh sách vận đơn")
         st.dataframe(df.head(100), use_container_width=True)
     else:
-        st.warning("Sheet trống hoặc không có dữ liệu.")
+        st.warning("Sheet trống hoặc chỉ có tiêu đề.")
+        records = []
 
 except Exception as e:
     st.error(f"❌ Lỗi kết nối dữ liệu: {e}")
-    st.info("Mẹo: Nếu vẫn lỗi, hãy bôi đen cột Tracking Number trong Google Sheet -> Định dạng -> Số -> Văn bản thuần túy.")
     st.stop()
 
 st.divider()
@@ -90,6 +94,7 @@ st.divider()
 # --- KHU VỰC NÚT BẤM ---
 col_reg, col_track = st.columns(2)
 
+# ACTION 1: REGISTER
 if col_reg.button("🔥 CHẠY REGISTER (Mã mới)", use_container_width=True):
     with st.spinner("Đang đăng ký mã mới..."):
         to_reg = []
@@ -104,13 +109,14 @@ if col_reg.button("🔥 CHẠY REGISTER (Mã mới)", use_container_width=True):
                 if len(to_reg) >= 40: break
         
         if to_reg:
-            headers = {"Content-Type": "application/json", "17token": TRACK17_API_KEY}
-            requests.post(REGISTER_URL, json=to_reg, headers=headers)
+            headers_api = {"Content-Type": "application/json", "17token": TRACK17_API_KEY}
+            requests.post(REGISTER_URL, json=to_reg, headers=headers_api)
             sheet.batch_update(updates)
             st.success(f"✅ Đã Register xong {len(to_reg)} mã.")
             st.rerun()
-        else: st.warning("Không có mã mới cần Register.")
+        else: st.warning("Không có mã mới.")
 
+# ACTION 2: TRACK
 if col_track.button("📡 CHẠY GET TRACK INFO (Cập nhật SLA)", use_container_width=True):
     with st.spinner("Đang cập nhật hành trình..."):
         to_track = []
@@ -126,8 +132,8 @@ if col_track.button("📡 CHẠY GET TRACK INFO (Cập nhật SLA)", use_contain
                 if len(to_track) >= 40: break
         
         if to_track:
-            headers = {"Content-Type": "application/json", "17token": TRACK17_API_KEY}
-            resp = requests.post(TRACK_INFO_URL, json=to_track, headers=headers)
+            headers_api = {"Content-Type": "application/json", "17token": TRACK17_API_KEY}
+            resp = requests.post(TRACK_INFO_URL, json=to_track, headers=headers_api)
             data_resp = resp.json().get("data", {})
             accepted = data_resp.get("accepted", [])
             
@@ -148,8 +154,8 @@ if col_track.button("📡 CHẠY GET TRACK INFO (Cập nhật SLA)", use_contain
                     if ("in transit" in desc or "accepted" in desc or "picked up" in desc) and not transit_vn: transit_vn = t_str
                 
                 ridx = row_map.get(num)
-                # Lấy dữ liệu cũ từ sheet bằng DataFrame để tránh lỗi truy cập index
-                sheet_label = str(df.iloc[ridx-2]['Label_Created_At']) if ridx else ""
+                # Lấy nhãn cũ từ list records để an toàn
+                sheet_label = str(records[ridx-2].get('Label_Created_At', ''))
                 eff_label = label_vn if label_vn else sheet_label
                 sla_val = calculate_sla_hours(eff_label, transit_vn)
                 
@@ -160,5 +166,5 @@ if col_track.button("📡 CHẠY GET TRACK INFO (Cập nhật SLA)", use_contain
             
             if updates:
                 sheet.batch_update(updates)
-                st.success("✅ Đã cập nhật xong.")
+                st.success("✅ Cập nhật hành trình thành công.")
                 st.rerun()
