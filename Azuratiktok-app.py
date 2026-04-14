@@ -231,4 +231,5 @@ if __name__ == "__main__":
                 print("ℹ️ Không có dữ liệu mới được thêm.")
         else:
             print(f"ℹ️ Không tìm thấy đơn hàng Tiktok nào trong ngày {TARGET_DATE}.")
-            bot.send_email_report(0,
+            # ĐÃ FIX: Đóng ngoặc đúng chuẩn và thêm list rỗng [] cho biến details
+            bot.send_email_report(0,[])
