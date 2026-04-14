@@ -1,0 +1,42 @@
+name: Azura TikTok Daily Sync
+
+on:
+  # Cho phép bấm chạy thủ công trên giao diện GitHub
+  workflow_dispatch: 
+  
+  # Chạy tự động theo lịch
+  schedule:
+    # 22:15 giờ Việt Nam (GMT+7) tương đương với 15:15 giờ UTC.
+    # Cú pháp Cron: Phút Giờ Ngày Tháng Ngày_trong_tuần
+    - cron: '15 15 * * *'
+
+jobs:
+  sync_tiktok_orders:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10' # Hoặc phiên bản Python bạn đang dùng
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests gspread oauth2client
+
+      - name: Run Azura TikTok Script
+        env:
+          # Đẩy Secrets từ GitHub vào Environment Variables cho Python đọc
+          AZURA_USER: ${{ secrets.AZURA_USER }}
+          AZURA_PASS: ${{ secrets.AZURA_PASS }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+        run: |
+          python Azuratiktok-app.py
