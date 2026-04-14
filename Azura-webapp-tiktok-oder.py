@@ -4,6 +4,7 @@ import requests
 import smtplib
 import io
 import csv
+import re
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -31,32 +32,49 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. ENGINE XỬ LÝ - SỬ DỤNG LOGIC CỦA MUG-APP.PY
+# 2. ENGINE XỬ LÝ - BÊ 100% LOGIN TỪ MUG-APP
 # ==========================================
 class AzuraTikTokEngine:
     def __init__(self):
         self.base_url = "https://portal.aluffm.com"
-        # Dùng requests.Session() y hệt cách các app chuẩn làm để tự quản lý Cookie
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest"
+        }
 
     def login(self):
-        payload = {"UserName": AZ_USER, "Password": AZ_PASS, "RememberMe": "false"}
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        
         try:
-            # Login nguyên bản
-            resp = self.session.post(f"{self.base_url}/Account/Login", data=payload, headers=headers, allow_redirects=False, timeout=15)
+            # BƯỚC 1: GET ĐỂ LẤY TOKEN ẨN (Y HỆT MUG-APP)
+            r1 = self.session.get(f"{self.base_url}/Login", timeout=15)
             
-            # Check thành công đơn giản: Cookie đã được nạp vào session
-            if resp.status_code in [200, 302] and len(self.session.cookies) > 0:
+            # TÌM TOKEN BẰNG REGEX (Y HỆT MUG-APP)
+            match = re.search(r'name="__RequestVerificationToken"[^>]*value="([^"]+)"', r1.text)
+            token = match.group(1) if match else ""
+            
+            # BƯỚC 2: POST KÈM TOKEN VÀ REFERER (Y HỆT MUG-APP)
+            payload = {
+                "UserName": AZ_USER, 
+                "Password": AZ_PASS, 
+                "__RequestVerificationToken": token, 
+                "RememberMe": "false"
+            }
+            self.session.post(
+                f"{self.base_url}/Login", 
+                data=payload, 
+                headers={"Referer": f"{self.base_url}/Login"}, 
+                allow_redirects=False
+            )
+
+            # BƯỚC 3: CHECK COOKIE ASP.NET (Y HỆT MUG-APP)
+            ck_dict = self.session.cookies.get_dict()
+            if '.AspNetCore.Identity.Application' in ck_dict:
+                self.headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in ck_dict.items()])
                 return True, "Thành công"
             else:
-                return False, f"Portal từ chối đăng nhập (Mã: {resp.status_code})"
+                return False, "Đăng nhập thất bại: Không tìm thấy Cookie hệ thống."
         except Exception as e:
-            return False, f"Lỗi mạng: {str(e)}"
+            return False, f"Lỗi mạng/hệ thống: {str(e)}"
 
     def fetch_orders(self, start_date, end_date):
         all_data = []
@@ -68,8 +86,12 @@ class AzuraTikTokEngine:
         while True:
             status_msg.text(f"⏳ Đang thu thập dữ liệu trang {page}...")
             try:
-                # Dùng self.session.get để tự động kẹp Cookie đã login
-                resp = self.session.get(f"{self.base_url}/OnBehalfOrder/List", params={"page": page, "rows": 50}, timeout=20)
+                resp = requests.get(
+                    f"{self.base_url}/OnBehalfOrder/List", 
+                    params={"page": page, "rows": 50}, 
+                    headers=self.headers, 
+                    timeout=20
+                )
                 if resp.status_code != 200: break
                 
                 rows = resp.json().get("rows", [])
