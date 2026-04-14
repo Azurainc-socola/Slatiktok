@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials # Đã cập nhật thư viện mới
 
 # ==========================================
 # 1. CẤU HÌNH HỆ THỐNG & THỜI GIAN
@@ -147,8 +147,9 @@ class AzuraTikTokAutomation:
         
         try:
             creds_dict = json.loads(GCP_JSON)
-            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            # Đã cập nhật scope và phương thức xác thực chuẩn API v4
+            scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             client = gspread.authorize(creds)
             sheet = client.open_by_key(SHEET_ID).sheet1
 
