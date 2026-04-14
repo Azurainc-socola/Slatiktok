@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import gspread
-from google.oauth2.service_account import Credentials # Đã cập nhật thư viện mới
+from google.oauth2.service_account import Credentials
 
 # ==========================================
 # 1. CẤU HÌNH HỆ THỐNG & THỜI GIAN
@@ -16,14 +16,14 @@ VN_TZ = timezone(timedelta(hours=7))
 now_vn = datetime.now(VN_TZ)
 TARGET_DATE = now_vn.strftime('%Y-%m-%d') 
 
-# Lấy thông tin từ GitHub Secrets
-AZURA_USER = os.getenv("AZURA_USER")
-AZURA_PASS = os.getenv("AZURA_PASS")
-SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-GCP_JSON = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASS = os.getenv("EMAIL_PASS")
-EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS")
+# Lấy thông tin từ GitHub Secrets và dùng .strip() để chống lỗi khoảng trắng/xuống dòng
+AZURA_USER = str(os.getenv("AZURA_USER", "")).strip()
+AZURA_PASS = str(os.getenv("AZURA_PASS", "")).strip()
+SHEET_ID = str(os.getenv("GOOGLE_SHEET_ID", "")).strip()
+GCP_JSON = str(os.getenv("GCP_SERVICE_ACCOUNT_JSON", "")).strip()
+EMAIL_USER = str(os.getenv("EMAIL_USER", "")).strip()
+EMAIL_PASS = str(os.getenv("EMAIL_PASS", "")).strip()
+EMAIL_RECEIVERS = str(os.getenv("EMAIL_RECEIVERS", "")).strip()
 
 class AzuraTikTokAutomation:
     def __init__(self):
@@ -147,7 +147,6 @@ class AzuraTikTokAutomation:
         
         try:
             creds_dict = json.loads(GCP_JSON)
-            # Đã cập nhật scope và phương thức xác thực chuẩn API v4
             scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
             creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
             client = gspread.authorize(creds)
