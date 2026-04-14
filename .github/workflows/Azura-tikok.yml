@@ -6,9 +6,9 @@ on:
   
   # Chạy tự động theo lịch
   schedule:
-    # 23:15 giờ Việt Nam (GMT+7) tương đương với 16:15 giờ UTC.
+    # 22:15 giờ Việt Nam (GMT+7) tương đương với 15:15 giờ UTC.
     # Cú pháp Cron: Phút Giờ Ngày Tháng Ngày_trong_tuần
-    - cron: '15 16 * * *'
+    - cron: '15 15 * * *'
 
 jobs:
   sync_tiktok_orders:
