@@ -2,7 +2,7 @@ import os
 import json
 import requests
 import smtplib
-import re # Đã thêm thư viện re để bắt Token
+import re
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -29,16 +29,15 @@ class AzuraTikTokAutomation:
     def __init__(self):
         self.session = requests.Session()
         self.base_url = "https://portal.aluffm.com"
-        self.login_url = f"{self.base_url}/Login" # Đã sửa URL giống file chuẩn
+        self.login_url = f"{self.base_url}/Login"
         self.order_api = f"{self.base_url}/OnBehalfOrder/List"
         self.sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
-        self.cookie_str = "" # Lưu trữ cookie
+        self.cookie_str = ""
 
     def login(self):
-        """Đăng nhập lấy Cookie giống 100% logic của WebApp Streamlit"""
+        """Đăng nhập lấy Cookie hệ thống"""
         try:
             print("🌐 Đang kết nối hệ thống Portal để lấy Token...")
-            # 1. GET request để lấy trang login và bắt RequestVerificationToken
             r1 = self.session.get(self.login_url, timeout=15)
             match = re.search(r'name="__RequestVerificationToken"[^>]*value="([^"]+)"', r1.text)
             
@@ -47,8 +46,6 @@ class AzuraTikTokAutomation:
                 return False
             
             token = match.group(1)
-            
-            # 2. POST request kèm token để đăng nhập
             payload = {
                 "UserName": AZURA_USER, 
                 "Password": AZURA_PASS, 
@@ -56,108 +53,106 @@ class AzuraTikTokAutomation:
                 "RememberMe": "false"
             }
             headers = {"Referer": self.login_url}
-            
             self.session.post(self.login_url, data=payload, headers=headers, allow_redirects=False)
 
-            # 3. Trích xuất cookie từ session
             ck_dict = self.session.cookies.get_dict()
             if '.AspNetCore.Identity.Application' in ck_dict:
                 self.cookie_str = "; ".join([f"{k}={v}" for k, v in ck_dict.items()])
-                
-                # Cập nhật Header cho toàn bộ Session để dùng cho lúc fetch data
                 self.session.headers.update({
                     'Cookie': self.cookie_str, 
                     'X-Requested-With': 'XMLHttpRequest'
                 })
-                print("✅ Đăng nhập Azura Portal thành công và đã lưu Cookie.")
+                print("✅ Đăng nhập Azura Portal thành công.")
                 return True
             else:
-                print("❌ Đăng nhập thất bại: Sai tài khoản, mật khẩu hoặc hệ thống từ chối.")
+                print("❌ Đăng nhập thất bại: Kiểm tra lại tài khoản/mật khẩu.")
                 return False
-                
         except Exception as e:
             print(f"❌ Lỗi mạng lúc đăng nhập: {e}")
             return False
 
     def fetch_tiktok_orders(self):
-        """Lọc đơn hàng Tiktok theo ngày chỉ định"""
-        all_matches =[]
+        """Quét đơn hàng và xử lý lệch múi giờ UTC -> VN"""
+        all_matches = []
         page = 1
         stop_searching = False
 
-        print(f"🚀 Bắt đầu quét đơn hàng ngày: {TARGET_DATE}...")
+        print(f"🚀 Bắt đầu quét đơn hàng ngày: {TARGET_DATE} (Giờ VN)...")
 
         while not stop_searching:
-            # Đã sửa lại Params giống file chuẩn: pageSize và pageNumber
             params = {"pageSize": 50, "pageNumber": page}
-            
             try:
                 resp = self.session.get(self.order_api, params=params, timeout=20)
-                if resp.status_code != 200:
-                    print(f"⚠️ Lỗi khi gọi API trang {page}. Status: {resp.status_code}")
-                    break
+                if resp.status_code != 200: break
                 
                 data = resp.json()
-                rows = data.get("rows",[])
-                if not rows:
-                    break
+                rows = data.get("rows", [])
+                if not rows: break
 
                 for row in rows:
                     created_at_raw = row.get("createdAt", "")
-                    # Format: 2026-04-14T05:02:16Z -> lấy 10 ký tự đầu
-                    order_date = created_at_raw[:10]
+                    order_date_vn = ""
                     
-                    # Chỉ lấy đơn có partner là Tiktok
+                    if created_at_raw:
+                        # Convert UTC string to Vietnam Time
+                        # API format: 2024-05-20T10:00:00Z
+                        dt_utc = datetime.strptime(created_at_raw[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+                        dt_vn = dt_utc.astimezone(VN_TZ)
+                        order_date_vn = dt_vn.strftime('%Y-%m-%d')
+
                     if row.get("shippingPartnerString") == "Tiktok":
-                        if order_date == TARGET_DATE:
+                        if order_date_vn == TARGET_DATE:
+                            row['date_vn_formatted'] = order_date_vn
                             all_matches.append(self.process_row_data(row))
-                        elif order_date < TARGET_DATE:
-                            # Vì đơn hàng thường sắp xếp mới nhất lên đầu, 
-                            # nếu đã sang ngày cũ hơn thì có thể dừng
-                            pass
+                        elif order_date_vn < TARGET_DATE:
+                            # Nếu đã gặp đơn cũ hơn ngày cần tìm thì có thể dừng (do đơn sắp xếp mới nhất lên đầu)
+                            stop_searching = True
                 
-                # Nếu trang hiện tại toàn đơn cũ hơn ngày cần tìm, có thể dừng để tối ưu
-                last_order_in_page = rows[-1].get("createdAt", "")[:10]
-                if last_order_in_page < TARGET_DATE:
-                    stop_searching = True
-                
+                # Kiểm tra đơn cuối cùng của trang để quyết định có sang trang tiếp không
+                last_row_raw = rows[-1].get("createdAt", "")
+                if last_row_raw:
+                    last_dt_vn = datetime.strptime(last_row_raw[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).astimezone(VN_TZ)
+                    if last_dt_vn.strftime('%Y-%m-%d') < TARGET_DATE:
+                        stop_searching = True
+
                 page += 1
-                if page > 100: # Giới hạn an toàn (file chuẩn là 300)
-                    break
+                if page > 200: break # Giới hạn an toàn
             except Exception as e:
-                print(f"❌ Lỗi khi tải dữ liệu trang {page}: {e}")
+                print(f"❌ Lỗi dữ liệu trang {page}: {e}")
                 break
                 
         return all_matches
 
     def process_row_data(self, row):
-        """Mapping dữ liệu theo đúng cột Google Sheet (A, B, I, J, K, L)"""
+        """Mapping dữ liệu theo cột Sheet (A, B, I, J, K, L)"""
         designs = row.get("orderProductDesigns", [])
-        job_ids =[str(d.get("jobId")) for d in designs if d.get("jobId") is not None]
+        job_ids = [str(d.get("jobId")) for d in designs if d.get("jobId") is not None]
         job_id_str = ", ".join(sorted(list(set(job_ids)))) if job_ids else ""
 
         return {
-            "A": row.get("customer", ""),               # Seller_Name
-            "B": row.get("partnerBarcode", ""),         # Tracking_Number
-            "I": row.get("customerOrder", ""),          # Order_number
-            "J": job_id_str,                            # Job ID
-            "K": row.get("id", ""),                     # AzuraID
-            "L": row.get("createdAt", "")[:10]          # Azura_Creat_At (YYYY-MM-DD)
+            "A": row.get("customer", ""),
+            "B": row.get("partnerBarcode", ""),
+            "I": row.get("customerOrder", ""),
+            "J": job_id_str,
+            "K": row.get("id", ""),
+            "L": row.get("date_vn_formatted", "") # Sử dụng ngày đã convert sang giờ VN
         }
 
     def update_google_sheet(self, data_list):
         """Ghi dữ liệu vào Google Sheet"""
-        if not data_list:
-            return 0
+        if not data_list: return 0
+        if not GCP_JSON:
+            print("❌ Lỗi: Thiếu cấu hình GCP_SERVICE_ACCOUNT_JSON trong Secrets.")
+            return -1
         
         try:
             creds_dict = json.loads(GCP_JSON)
-            scope =["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
             sheet = client.open_by_key(SHEET_ID).sheet1
 
-            rows_to_append =[]
+            rows_to_append = []
             for item in data_list:
                 row_data = [""] * 12 
                 row_data[0] = item["A"] # Cột A
@@ -175,27 +170,29 @@ class AzuraTikTokAutomation:
             return -1
 
     def send_email_report(self, count, details):
-        """Gửi email tổng kết"""
-        if not EMAIL_USER or not EMAIL_PASS: return
+        """Gửi email tổng kết đơn hàng"""
+        if not EMAIL_USER or not EMAIL_PASS or not EMAIL_RECEIVERS:
+            print("⚠️ Bỏ qua gửi Email do thiếu cấu hình Secrets.")
+            return
 
-        has_job = sum(1 for d in details if d['J'])
+        has_job = sum(1 for d in details if d.get('J'))
         no_job = count - has_job
 
         subject = f"[Azura TikTok] Báo cáo quét đơn ngày {TARGET_DATE}"
         body = f"""
         <html>
-        <body>
-            <h3>📊 Tổng kết quét đơn TikTok Shop</h3>
-            <p>- Ngày ghi nhận: <b>{TARGET_DATE}</b></p>
+        <body style="font-family: Arial, sans-serif;">
+            <h3 style="color: #2e6c80;">📊 Tổng kết quét đơn TikTok Shop</h3>
+            <p>- Ngày ghi nhận (Giờ VN): <b>{TARGET_DATE}</b></p>
             <p>- Tổng số đơn Tiktok tìm thấy: <b>{count}</b></p>
             <ul>
-                <li>Đã có JOB ID: <span style="color: green;">{has_job}</span></li>
-                <li>Chưa có JOB ID: <span style="color: red;">{no_job}</span></li>
+                <li>Đã có JOB ID: <span style="color: green; font-weight: bold;">{has_job}</span></li>
+                <li>Chưa có JOB ID: <span style="color: red; font-weight: bold;">{no_job}</span></li>
             </ul>
-            <p>📍 Dữ liệu đã được ghi tiếp vào Google Sheet.</p>
-            <p>🔗 Xem tại: <a href="{self.sheet_url}">Link Google Sheet</a></p>
+            <p>📍 Dữ liệu đã được cập nhật vào Google Sheet.</p>
+            <p>🔗 <a href="{self.sheet_url}">Mở Google Sheet của bạn</a></p>
             <br>
-            <p><i>Auto-generated by GitHub Actions</i></p>
+            <p style="font-size: 0.8em; color: gray;"><i>Tin nhắn tự động từ GitHub Actions Workflow</i></p>
         </body>
         </html>
         """
@@ -210,26 +207,33 @@ class AzuraTikTokAutomation:
             with smtplib.SMTP('smtp.gmail.com', 587) as server:
                 server.starttls()
                 server.login(EMAIL_USER, EMAIL_PASS.replace(" ", ""))
-                server.sendmail(EMAIL_USER, EMAIL_RECEIVERS.split(','), msg.as_string())
-            print("✅ Đã gửi email báo cáo.")
+                # Hỗ trợ gửi cho danh sách nhiều email cách nhau bởi dấu phẩy
+                receiver_list = [r.strip() for r in EMAIL_RECEIVERS.split(',')]
+                server.sendmail(EMAIL_USER, receiver_list, msg.as_string())
+            print("✅ Đã gửi email báo cáo thành công.")
         except Exception as e:
             print(f"❌ Lỗi gửi email: {e}")
 
 # ==========================================
-# CHƯƠNG TRÌNH CHÍNH
+# 3. CHƯƠNG TRÌNH CHÍNH
 # ==========================================
 if __name__ == "__main__":
     bot = AzuraTikTokAutomation()
-    if bot.login():
-        orders = bot.fetch_tiktok_orders()
-        if orders:
-            added_count = bot.update_google_sheet(orders)
-            if added_count > 0:
-                print(f"✅ Đã thêm {added_count} đơn vào Sheet.")
-                bot.send_email_report(len(orders), orders)
+    
+    # Kiểm tra cấu hình bắt buộc
+    if not all([AZURA_USER, AZURA_PASS, SHEET_ID]):
+        print("❌ Lỗi: Thiếu các biến môi trường quan trọng (User, Pass, SheetID).")
+    else:
+        if bot.login():
+            orders = bot.fetch_tiktok_orders()
+            if orders:
+                added_count = bot.update_google_sheet(orders)
+                if added_count > 0:
+                    print(f"✅ Đã thêm mới {added_count} đơn vào Sheet.")
+                    bot.send_email_report(len(orders), orders)
+                else:
+                    print("ℹ️ Không có dữ liệu nào được ghi thêm vào Sheet.")
             else:
-                print("ℹ️ Không có dữ liệu mới được thêm.")
-        else:
-            print(f"ℹ️ Không tìm thấy đơn hàng Tiktok nào trong ngày {TARGET_DATE}.")
-            # ĐÃ FIX: Đóng ngoặc đúng chuẩn và thêm list rỗng [] cho biến details
-            bot.send_email_report(0,[])
+                print(f"ℹ️ Không tìm thấy đơn hàng Tiktok nào trong ngày {TARGET_DATE}.")
+                # Gửi báo cáo 0 đơn để người dùng yên tâm tool vẫn chạy
+                bot.send_email_report(0, [])
