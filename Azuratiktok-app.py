@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import smtplib
+import re # Đã thêm thư viện re để bắt Token
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -13,7 +14,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ==========================================
 VN_TZ = timezone(timedelta(hours=7))
 now_vn = datetime.now(VN_TZ)
-# Theo PRD: Chạy lúc 23:15 hàng ngày để quét đơn của ngày hôm đó
 TARGET_DATE = now_vn.strftime('%Y-%m-%d') 
 
 # Lấy thông tin từ GitHub Secrets
@@ -29,77 +29,111 @@ class AzuraTikTokAutomation:
     def __init__(self):
         self.session = requests.Session()
         self.base_url = "https://portal.aluffm.com"
-        self.login_url = f"{self.base_url}/Account/Login"
+        self.login_url = f"{self.base_url}/Login" # Đã sửa URL giống file chuẩn
         self.order_api = f"{self.base_url}/OnBehalfOrder/List"
         self.sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
+        self.cookie_str = "" # Lưu trữ cookie
 
     def login(self):
-        """Đăng nhập lấy Cookie"""
-        payload = {
-            "UserName": AZURA_USER,
-            "Password": AZURA_PASS,
-            "RememberMe": "false"
-        }
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        response = self.session.post(self.login_url, data=payload, headers=headers, allow_redirects=False)
-        if response.status_code in [200, 302]:
-            print("✅ Đăng nhập Azura Portal thành công.")
-            return True
-        else:
-            print(f"❌ Đăng nhập thất bại. Status: {response.status_code}")
+        """Đăng nhập lấy Cookie giống 100% logic của WebApp Streamlit"""
+        try:
+            print("🌐 Đang kết nối hệ thống Portal để lấy Token...")
+            # 1. GET request để lấy trang login và bắt RequestVerificationToken
+            r1 = self.session.get(self.login_url, timeout=15)
+            match = re.search(r'name="__RequestVerificationToken"[^>]*value="([^"]+)"', r1.text)
+            
+            if not match:
+                print("❌ Lỗi: Không bắt được RequestVerificationToken.")
+                return False
+            
+            token = match.group(1)
+            
+            # 2. POST request kèm token để đăng nhập
+            payload = {
+                "UserName": AZURA_USER, 
+                "Password": AZURA_PASS, 
+                "__RequestVerificationToken": token, 
+                "RememberMe": "false"
+            }
+            headers = {"Referer": self.login_url}
+            
+            self.session.post(self.login_url, data=payload, headers=headers, allow_redirects=False)
+
+            # 3. Trích xuất cookie từ session
+            ck_dict = self.session.cookies.get_dict()
+            if '.AspNetCore.Identity.Application' in ck_dict:
+                self.cookie_str = "; ".join([f"{k}={v}" for k, v in ck_dict.items()])
+                
+                # Cập nhật Header cho toàn bộ Session để dùng cho lúc fetch data
+                self.session.headers.update({
+                    'Cookie': self.cookie_str, 
+                    'X-Requested-With': 'XMLHttpRequest'
+                })
+                print("✅ Đăng nhập Azura Portal thành công và đã lưu Cookie.")
+                return True
+            else:
+                print("❌ Đăng nhập thất bại: Sai tài khoản, mật khẩu hoặc hệ thống từ chối.")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Lỗi mạng lúc đăng nhập: {e}")
             return False
 
     def fetch_tiktok_orders(self):
         """Lọc đơn hàng Tiktok theo ngày chỉ định"""
-        all_matches = []
+        all_matches =[]
         page = 1
         stop_searching = False
 
         print(f"🚀 Bắt đầu quét đơn hàng ngày: {TARGET_DATE}...")
 
         while not stop_searching:
-            params = {"page": page, "rows": 50}
-            resp = self.session.get(self.order_api, params=params)
-            if resp.status_code != 200:
-                print(f"⚠️ Lỗi khi gọi API trang {page}")
-                break
+            # Đã sửa lại Params giống file chuẩn: pageSize và pageNumber
+            params = {"pageSize": 50, "pageNumber": page}
             
-            data = resp.json()
-            rows = data.get("rows", [])
-            if not rows:
-                break
-
-            for row in rows:
-                created_at_raw = row.get("createdAt", "")
-                # Format: 2026-04-14T05:02:16Z -> lấy 10 ký tự đầu
-                order_date = created_at_raw[:10]
+            try:
+                resp = self.session.get(self.order_api, params=params, timeout=20)
+                if resp.status_code != 200:
+                    print(f"⚠️ Lỗi khi gọi API trang {page}. Status: {resp.status_code}")
+                    break
                 
-                # Chỉ lấy đơn có partner là Tiktok
-                if row.get("shippingPartnerString") == "Tiktok":
-                    if order_date == TARGET_DATE:
-                        all_matches.append(self.process_row_data(row))
-                    elif order_date < TARGET_DATE:
-                        # Vì đơn hàng thường sắp xếp mới nhất lên đầu, 
-                        # nếu đã sang ngày cũ hơn thì có thể dừng (tùy portal)
-                        # Ở đây ta tiếp tục quét hết các trang để đảm bảo không sót
-                        pass
-            
-            # Nếu trang hiện tại toàn đơn cũ hơn ngày cần tìm, có thể dừng để tối ưu
-            last_order_in_page = rows[-1].get("createdAt", "")[:10]
-            if last_order_in_page < TARGET_DATE:
-                stop_searching = True
-            
-            page += 1
-            if page > 20: # Giới hạn an toàn tránh loop vô tận
+                data = resp.json()
+                rows = data.get("rows",[])
+                if not rows:
+                    break
+
+                for row in rows:
+                    created_at_raw = row.get("createdAt", "")
+                    # Format: 2026-04-14T05:02:16Z -> lấy 10 ký tự đầu
+                    order_date = created_at_raw[:10]
+                    
+                    # Chỉ lấy đơn có partner là Tiktok
+                    if row.get("shippingPartnerString") == "Tiktok":
+                        if order_date == TARGET_DATE:
+                            all_matches.append(self.process_row_data(row))
+                        elif order_date < TARGET_DATE:
+                            # Vì đơn hàng thường sắp xếp mới nhất lên đầu, 
+                            # nếu đã sang ngày cũ hơn thì có thể dừng
+                            pass
+                
+                # Nếu trang hiện tại toàn đơn cũ hơn ngày cần tìm, có thể dừng để tối ưu
+                last_order_in_page = rows[-1].get("createdAt", "")[:10]
+                if last_order_in_page < TARGET_DATE:
+                    stop_searching = True
+                
+                page += 1
+                if page > 100: # Giới hạn an toàn (file chuẩn là 300)
+                    break
+            except Exception as e:
+                print(f"❌ Lỗi khi tải dữ liệu trang {page}: {e}")
                 break
                 
         return all_matches
 
     def process_row_data(self, row):
         """Mapping dữ liệu theo đúng cột Google Sheet (A, B, I, J, K, L)"""
-        # Xử lý Job ID: Gom nhiều jobId thành 1 chuỗi, cách nhau bởi dấu phẩy
         designs = row.get("orderProductDesigns", [])
-        job_ids = [str(d.get("jobId")) for d in designs if d.get("jobId") is not None]
+        job_ids =[str(d.get("jobId")) for d in designs if d.get("jobId") is not None]
         job_id_str = ", ".join(sorted(list(set(job_ids)))) if job_ids else ""
 
         return {
@@ -118,23 +152,20 @@ class AzuraTikTokAutomation:
         
         try:
             creds_dict = json.loads(GCP_JSON)
-            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            scope =["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             client = gspread.authorize(creds)
-            sheet = client.open_by_key(SHEET_ID).sheet1 # Mặc định Sheet đầu tiên
+            sheet = client.open_by_key(SHEET_ID).sheet1
 
-            # Chuẩn bị mảng 2 chiều để ghi batch (tối ưu hơn ghi từng dòng)
-            # Vì yêu cầu ghi vào cột cụ thể, ta sẽ lấy toàn bộ dòng và chèn vào
-            rows_to_append = []
+            rows_to_append =[]
             for item in data_list:
-                # Tạo một dòng 12 cột (A đến L)
                 row_data = [""] * 12 
                 row_data[0] = item["A"] # Cột A
                 row_data[1] = item["B"] # Cột B
-                row_data[8] = item["I"] # Cột I (Index 8)
-                row_data[9] = item["J"] # Cột J (Index 9)
-                row_data[10] = item["K"] # Cột K (Index 10)
-                row_data[11] = item["L"] # Cột L (Index 11)
+                row_data[8] = item["I"] # Cột I
+                row_data[9] = item["J"] # Cột J
+                row_data[10] = item["K"] # Cột K
+                row_data[11] = item["L"] # Cột L
                 rows_to_append.append(row_data)
 
             sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
@@ -164,7 +195,7 @@ class AzuraTikTokAutomation:
             <p>📍 Dữ liệu đã được ghi tiếp vào Google Sheet.</p>
             <p>🔗 Xem tại: <a href="{self.sheet_url}">Link Google Sheet</a></p>
             <br>
-            <p><i>Auto-generated by Azura VibeCoder Assistant</i></p>
+            <p><i>Auto-generated by GitHub Actions</i></p>
         </body>
         </html>
         """
@@ -195,10 +226,9 @@ if __name__ == "__main__":
             added_count = bot.update_google_sheet(orders)
             if added_count > 0:
                 print(f"✅ Đã thêm {added_count} đơn vào Sheet.")
-                bot.send_report = bot.send_email_report(len(orders), orders)
+                bot.send_email_report(len(orders), orders)
             else:
                 print("ℹ️ Không có dữ liệu mới được thêm.")
         else:
             print(f"ℹ️ Không tìm thấy đơn hàng Tiktok nào trong ngày {TARGET_DATE}.")
-            # Vẫn gửi mail thông báo 0 đơn nếu cần
-            bot.send_email_report(0, [])
+            bot.send_email_report(0,
