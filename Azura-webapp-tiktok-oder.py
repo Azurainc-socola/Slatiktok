@@ -2,7 +2,8 @@ import streamlit as st
 import json
 import requests
 import smtplib
-import pandas as pd
+import io
+import csv
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -10,14 +11,14 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ==========================================
-# 1. CẤU HÌNH HỆ THỐNG & GIAO DIỆN
+# 1. CẤU HÌNH GIAO DIỆN SIÊU NHẸ
 # ==========================================
-st.set_page_config(page_title="Azura TikTok Sync Pro", page_icon="🛍️", layout="wide")
+st.set_page_config(page_title="Azura TikTok Sync (Ultra-Light)", page_icon="⚡", layout="centered")
 
 VN_TZ = timezone(timedelta(hours=7))
 today_vn = datetime.now(VN_TZ).date()
 
-# ĐỌC SECRETS (Bảo mật tuyệt đối - Không hiện lên UI)
+# ĐỌC SECRETS
 try:
     AZ_USER = st.secrets["AZURA_USER"]
     AZ_PASS = st.secrets["AZURA_PASS"]
@@ -52,7 +53,7 @@ class AzuraTikTokEngine:
         status_msg = st.empty()
         
         while True:
-            status_msg.text(f"⏳ Đang quét trang {page}...")
+            status_msg.text(f"⏳ Đang quét API trang {page}...")
             resp = self.session.get(f"{self.base_url}/OnBehalfOrder/List", params={"page": page, "rows": 50})
             if resp.status_code != 200: break
             
@@ -62,15 +63,12 @@ class AzuraTikTokEngine:
             for row in rows:
                 created_at = row.get("createdAt", "")[:10]
                 
-                # Điều kiện dừng: Nếu đơn đã cũ hơn ngày bắt đầu thì không quét tiếp các trang sau
                 if created_at < start_str:
                     status_msg.empty()
                     return all_data
 
-                # Lọc: Đúng khoảng ngày và đúng Partner là Tiktok
                 if start_str <= created_at <= end_str:
                     if row.get("shippingPartnerString") == "Tiktok":
-                        # Xử lý Job ID (Gom nhiều Job ID thành chuỗi)
                         designs = row.get("orderProductDesigns", [])
                         job_ids = [str(d.get("jobId")) for d in designs if d.get("jobId")]
                         job_id_str = ", ".join(sorted(list(set(job_ids))))
@@ -84,7 +82,7 @@ class AzuraTikTokEngine:
                             "Azura_Creat_At": created_at
                         })
             page += 1
-            if page > 100: break # Giới hạn an toàn
+            if page > 200: break # Mở rộng limit cho ngày siêu sale
             
         status_msg.empty()
         return all_data
@@ -96,20 +94,20 @@ class AzuraTikTokEngine:
             client = gspread.authorize(creds)
             sheet = client.open_by_key(GS_ID).sheet1
 
-            # Mapping dữ liệu vào đúng cột (A, B, I, J, K, L)
             final_rows = []
             for item in data_list:
                 row = [""] * 12
-                row[0] = item["Seller_Name"]    # Cột A
-                row[1] = item["Tracking_Number"] # Cột B
-                row[8] = item["Order_Number"]    # Cột I
-                row[9] = item["Job_ID"]          # Cột J
-                row[10] = item["AzuraID"]        # Cột K
-                row[11] = item["Azura_Creat_At"] # Cột L
+                row[0] = item["Seller_Name"]
+                row[1] = item["Tracking_Number"]
+                row[8] = item["Order_Number"]
+                row[9] = item["Job_ID"]
+                row[10] = item["AzuraID"]
+                row[11] = item["Azura_Creat_At"]
                 final_rows.append(row)
 
+            # Ghi vào Sheet 1 lần duy nhất (Batch update)
             sheet.append_rows(final_rows, value_input_option="USER_ENTERED")
-            return True, f"Thành công: Đã ghi {len(final_rows)} đơn vào Sheet."
+            return True, f"Thành công: Đã ghi {len(final_rows)} đơn vào Google Sheet."
         except Exception as e:
             return False, f"Lỗi Google Sheet: {str(e)}"
 
@@ -127,13 +125,13 @@ class AzuraTikTokEngine:
             body = f"""
             <h3>📊 Báo cáo kết quả quét đơn TikTok</h3>
             <p>- Khoảng thời gian: <b>{start_str}</b> đến <b>{end_str}</b></p>
-            <p>- Tổng đơn tìm thấy: <b>{count}</b></p>
+            <p>- Tổng đơn ghi nhận: <b>{count}</b></p>
             <ul>
-                <li>Đã có Job ID: {has_job}</li>
-                <li>Chưa có Job ID: {count - has_job}</li>
+                <li>Đã có Job ID: <span style="color: green;">{has_job}</span></li>
+                <li>Chưa có Job ID: <span style="color: red;">{count - has_job}</span></li>
             </ul>
-            <p>📍 Dữ liệu đã được cập nhật vào Google Sheet.</p>
             <p>🔗 <a href="https://docs.google.com/spreadsheets/d/{GS_ID}">Mở file Google Sheet</a></p>
+            <p><i>Hệ thống tự động đồng bộ - Không cần phản hồi mail này.</i></p>
             """
             msg.attach(MIMEText(body, 'html'))
             
@@ -148,74 +146,70 @@ class AzuraTikTokEngine:
             return False
 
 # ==========================================
-# 3. GIAO DIỆN NGƯỜI DÙNG (FOREND)
+# 3. GIAO DIỆN (UI) - KHÔNG RENDER DATA
 # ==========================================
-st.title("🚀 AZURA TIKTOK SYNC - PHIÊN BẢN NÂNG CẤP")
+st.title("⚡ AZURA TIKTOK SYNC")
+st.markdown("Phiên bản Tối ưu hiệu năng - Chạy nền an toàn không giới hạn đơn.")
 
-with st.sidebar:
-    st.header("📅 Lọc Theo Ngày")
-    # Mặc định là ngày hiện tại
-    date_pick = st.date_input("Chọn khoảng ngày", (today_vn, today_vn))
-    
+with st.form("run_form"):
+    st.subheader("📅 Cấu hình chạy")
+    col1, col2 = st.columns(2)
+    with col1:
+        date_pick = st.date_input("Chọn khoảng ngày", (today_vn, today_vn))
+    with col2:
+        is_mail = st.checkbox("Gửi Email báo cáo", value=True)
+        mail_to = st.text_input("Email nhận", placeholder="a@gmail.com, b@gmail.com")
+        
+    run_btn = st.form_submit_button("🚀 BẮT ĐẦU CHẠY", use_container_width=True)
+
+if run_btn:
     if len(date_pick) == 2:
         start_d, end_d = date_pick
     else:
         start_d = end_d = date_pick[0]
 
-    st.divider()
-    st.header("📧 Gửi Báo Cáo")
-    is_mail = st.checkbox("Gửi Email sau khi xong", value=True)
-    if is_mail:
-        mail_to = st.text_input("Người nhận (To)", placeholder="email1, email2...")
-        mail_cc = st.text_input("Đồng gửi (CC)")
-
-    st.divider()
-    run_btn = st.button("🚀 BẮT ĐẦU CHẠY", type="primary", use_container_width=True)
-
-if run_btn:
     engine = AzuraTikTokEngine()
     
-    with st.status("🚀 Đang xử lý...", expanded=True) as status:
+    with st.status("🚀 Đang chạy luồng xử lý...", expanded=True) as status:
         st.write("🔑 Đang kết nối Azura Portal...")
         if not engine.login():
-            st.error("❌ Đăng nhập Portal thất bại! Kiểm tra lại AZURA_USER/PASS trong Secrets.")
+            st.error("❌ Đăng nhập thất bại!")
             st.stop()
             
-        st.write(f"🔍 Đang tìm đơn Tiktok từ {start_d} đến {end_d}...")
+        st.write(f"🔍 Đang quét dữ liệu từ {start_d} đến {end_d}...")
         results = engine.fetch_orders(start_d, end_d)
         
         if not results:
-            status.update(label="Hoàn tất - Không có đơn", state="complete")
-            st.info("Không tìm thấy đơn hàng Tiktok nào trong khoảng ngày đã chọn.")
+            status.update(label="Xong! Không có đơn mới.", state="complete")
+            st.info("Không tìm thấy đơn hàng Tiktok nào.")
             st.stop()
             
-        st.write(f"✅ Tìm thấy {len(results)} đơn. Đang ghi vào Google Sheet...")
+        st.write(f"✅ Đã tải xong {len(results)} đơn. Bắt đầu đẩy lên Google Sheet...")
         success, msg = engine.update_sheet(results)
         
         if success:
             st.write(f"✅ {msg}")
             if is_mail and mail_to:
-                st.write("📧 Đang gửi email báo cáo...")
-                if engine.send_email(results, str(start_d), str(end_d), mail_to, mail_cc):
-                    st.write("✅ Đã gửi Email báo cáo thành công.")
+                st.write("📧 Đang gửi email...")
+                engine.send_email(results, str(start_d), str(end_d), mail_to, "")
+                st.write("✅ Đã gửi Email.")
         else:
             st.error(msg)
             
-        status.update(label="🎉 Tất cả đã hoàn tất!", state="complete")
+        status.update(label="🎉 Tiến trình hoàn tất!", state="complete")
 
-    # ==========================================
-    # PHẦN HIỂN THỊ DỮ LIỆU TỐI ƯU (PREVIEW)
-    # ==========================================
-    st.divider()
-    st.subheader(f"📊 Preview dữ liệu ({len(results)} đơn)")
-    df = pd.DataFrame(results)
+    # Hiển thị thống kê gọn gàng thay vì nguyên cái bảng
+    st.success(f"**Tổng kết:** Đã quét và đồng bộ thành công **{len(results)}** đơn hàng.")
     
-    # Chỉ load 50 dòng ra Web để tránh treo trình duyệt
-    st.dataframe(df.head(50), use_container_width=True)
+    # Nút tải CSV dùng thư viện lõi, không tốn RAM
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=["Seller_Name", "Tracking_Number", "Order_Number", "Job_ID", "AzuraID", "Azura_Creat_At"])
+    writer.writeheader()
+    writer.writerows(results)
     
-    if len(results) > 50:
-        st.caption(f"*(Chỉ hiển thị 50 dòng đầu để tối ưu tốc độ. Toàn bộ {len(results)} đơn đã có trong Sheet)*")
-
-    # Nút tải CSV nhanh
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("⬇️ Tải file CSV kết quả", data=csv, file_name=f"tiktok_orders_{start_d}.csv", mime='text/csv')
+    st.download_button(
+        label="⬇️ Nhấn vào đây để tải file CSV (nếu cần)",
+        data=output.getvalue().encode('utf-8'),
+        file_name=f"tiktok_orders_{start_d}.csv",
+        mime='text/csv'
+    )
